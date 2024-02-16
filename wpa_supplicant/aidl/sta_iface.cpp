@@ -2441,11 +2441,11 @@ StaIface::removeQosPolicyForScsInternal(const std::vector<uint8_t>& scsPolicyIds
 }
 
 ::ndk::ScopedAStatus StaIface::configureMscsInternal(const MscsParams& params) {
-	return createStatus(SupplicantStatusCode::FAILURE_UNSUPPORTED);
+	return ndk::ScopedAStatus::ok();
 }
 
 ::ndk::ScopedAStatus StaIface::disableMscsInternal() {
-	return createStatus(SupplicantStatusCode::FAILURE_UNSUPPORTED);
+	return ndk::ScopedAStatus::ok();
 }
 
 /**
