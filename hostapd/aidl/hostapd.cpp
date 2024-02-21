@@ -621,7 +621,14 @@ std::string CreateHostapdConfig(
 					"vht_oper_chwidth=1\n";
 			}
 			if (band & band6Ghz) {
+#ifdef CONFIG_IEEE80211BE
+				if (iface_params.hwModeParams.enable80211BE)
+					ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string += "op_class=137\n";
+				else
+					ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string += "op_class=134\n";
+#else /* CONFIG_IEEE80211BE */
 				ht_cap_vht_oper_he_oper_eht_oper_chwidth_as_string += "op_class=134\n";
+#endif /* CONFIG_IEEE80211BE */
 			}
 #ifdef CONFIG_IEEE80211AX
 			if (iface_params.hwModeParams.enable80211AX) {
