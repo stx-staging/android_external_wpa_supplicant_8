@@ -2266,6 +2266,70 @@ static int scs_parse_type4(struct tclas_element *elem, QosPolicyScsData qos_poli
 	return 0;
 }
 
+inline bool hasOptQosCharField(QosCharacteristics chars, QosCharacteristics::QosCharacteristicsMask field) {
+	return chars.optionalFieldMask & static_cast<uint32_t>(field);
+}
+
+static int parseQosCharacteristics(struct scs_desc_elem *descElem, QosPolicyScsData qosPolicy) {
+	struct qos_characteristics* suppChars = &descElem->qos_char_elem;
+	if (!qosPolicy.QosCharacteristics) {
+		suppChars->available = false;
+		return 0;
+	}
+
+	QosCharacteristics inputChars = qosPolicy.QosCharacteristics.value();
+	suppChars->available = true;
+
+	if (qosPolicy.direction == QosPolicyScsData::LinkDirection::DOWNLINK) {
+		suppChars->direction = SCS_DIRECTION_DOWN;
+	} else if (qosPolicy.direction == QosPolicyScsData::LinkDirection::UPLINK) {
+		suppChars->direction = SCS_DIRECTION_UP;
+	} else {
+		wpa_printf(MSG_ERROR, "Invalid QoS direction: %d", static_cast<int>(qosPolicy.direction));
+		return -1;
+	}
+
+	// Mandatory fields
+	suppChars->min_si = inputChars.minServiceIntervalUs;
+	suppChars->max_si = inputChars.maxServiceIntervalUs;
+	suppChars->min_data_rate = inputChars.minDataRateKbps;
+	suppChars->delay_bound = inputChars.delayBoundUs;
+
+	// Optional fields
+	uint16_t suppMask = 0;
+	if (hasOptQosCharField(inputChars, QosCharacteristics::QosCharacteristicsMask::MAX_MSDU_SIZE)) {
+		suppMask |= SCS_QOS_BIT_MAX_MSDU_SIZE;
+		suppChars->max_msdu_size = inputChars.maxMsduSizeOctets;
+	}
+	if (hasOptQosCharField(inputChars, QosCharacteristics::QosCharacteristicsMask::SERVICE_START_TIME)) {
+		// Client must provide both the service start time and the link ID if this field exists.
+		suppMask |= SCS_QOS_BIT_SERVICE_START_TIME | SCS_QOS_BIT_SERVICE_START_TIME_LINKID;
+		suppChars->service_start_time = inputChars.serviceStartTimeUs;
+		suppChars->service_start_time_link_id = inputChars.serviceStartTimeLinkId;
+	}
+	if (hasOptQosCharField(inputChars, QosCharacteristics::QosCharacteristicsMask::MEAN_DATA_RATE)) {
+		suppMask |= SCS_QOS_BIT_MEAN_DATA_RATE;
+		suppChars->mean_data_rate = inputChars.meanDataRateKbps;
+	}
+	if (hasOptQosCharField(inputChars, QosCharacteristics::QosCharacteristicsMask::BURST_SIZE)) {
+		suppMask |= SCS_QOS_BIT_DELAYED_BOUNDED_BURST_SIZE;
+		suppChars->burst_size = inputChars.burstSizeOctets;
+	}
+	if (hasOptQosCharField(inputChars, QosCharacteristics::QosCharacteristicsMask::MSDU_LIFETIME)) {
+		suppMask |= SCS_QOS_BIT_MSDU_LIFETIME;
+		suppChars->msdu_lifetime = inputChars.msduLifetimeMs;
+	}
+	if (hasOptQosCharField(inputChars, QosCharacteristics::QosCharacteristicsMask::MSDU_DELIVERY_INFO)) {
+		suppMask |= SCS_QOS_BIT_MSDU_DELIVERY_INFO;
+		// Expects the delivery ratio in the lower 4 bits and the count exponent
+		// in the upper 4 bits. See Figure 9-1001aw in the 802.11be spec.
+		suppChars->msdu_delivery_info = inputChars.msduDeliveryInfo.countExponent << 4
+			| (uint8_t) inputChars.msduDeliveryInfo.deliveryRatio;
+	}
+	suppChars->mask = suppMask;
+	return 0;
+}
+
 /**
  * This is a request to the AP (if it supports the feature) to apply the QoS policy
  * on traffic in the Downlink.
@@ -2322,6 +2386,11 @@ StaIface::addQosPolicyRequestForScsInternal(const std::vector<QosPolicyScsData>&
 		}
 
 		status.qosPolicyScsRequestStatusCode = QosPolicyScsRequestStatusCode::INVALID;
+		if (parseQosCharacteristics(&desc_elem, qosPolicyData[i])) {
+			reports.push_back(status);
+			continue;
+		}
+
 		user_priority = qosPolicyData[i].userPriority;
 		if (user_priority < 0 || user_priority > 7) {
 			wpa_printf(MSG_ERROR,
