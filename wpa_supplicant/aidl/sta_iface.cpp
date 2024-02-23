@@ -2332,7 +2332,7 @@ static int parseQosCharacteristics(struct scs_desc_elem *descElem, QosPolicyScsD
 
 /**
  * This is a request to the AP (if it supports the feature) to apply the QoS policy
- * on traffic in the Downlink.
+ * on traffic in the Downlink or Uplink direction.
  */
 std::pair<std::vector<QosPolicyScsRequestStatus>, ndk::ScopedAStatus>
 StaIface::addQosPolicyRequestForScsInternal(const std::vector<QosPolicyScsData>& qosPolicyData)
@@ -2350,6 +2350,11 @@ StaIface::addQosPolicyRequestForScsInternal(const std::vector<QosPolicyScsData>&
 			createStatus(SupplicantStatusCode::FAILURE_ONGOING_REQUEST)};
 	}
 	free_up_scs_desc(scs_data);
+
+	// Uplink policies are not supported before AIDL V3.
+	AidlManager *aidl_manager = AidlManager::getInstance();
+	WPA_ASSERT(aidl_manager);
+	bool supportsUplink = aidl_manager->isAidlServiceVersionAtLeast(3);
 
 	/**
 	 * format:
@@ -2391,38 +2396,43 @@ StaIface::addQosPolicyRequestForScsInternal(const std::vector<QosPolicyScsData>&
 			continue;
 		}
 
-		user_priority = qosPolicyData[i].userPriority;
-		if (user_priority < 0 || user_priority > 7) {
-			wpa_printf(MSG_ERROR,
-				   "Intra-Access user priority invalid %d", user_priority);
-			reports.push_back(status);
-			continue;
+		// TCLAS elements only need to be processed for downlink policies.
+		QosPolicyScsData::LinkDirection policyDirection = supportsUplink
+			? qosPolicyData[i].direction : QosPolicyScsData::LinkDirection::DOWNLINK;
+		if (policyDirection == QosPolicyScsData::LinkDirection::DOWNLINK) {
+			user_priority = qosPolicyData[i].userPriority;
+			if (user_priority < 0 || user_priority > 7) {
+				wpa_printf(MSG_ERROR,
+					"Intra-Access user priority invalid %d", user_priority);
+				reports.push_back(status);
+				continue;
+			}
+
+			desc_elem.intra_access_priority = user_priority;
+			desc_elem.scs_up_avail = true;
+
+			/**
+			* Supported classifier type 4.
+			*/
+			desc_elem.tclas_elems = (struct tclas_element *) os_malloc(sizeof(struct tclas_element));
+			if (!desc_elem.tclas_elems) {
+				wpa_printf(MSG_ERROR,
+					"Classifier type4 failed with Bad malloc");
+				reports.push_back(status);
+				continue;
+			}
+
+			elem = desc_elem.tclas_elems;
+			memset(elem, 0, sizeof(struct tclas_element));
+			elem->classifier_type = 4;
+			if (scs_parse_type4(elem, qosPolicyData[i]) < 0) {
+				os_free(elem);
+				reports.push_back(status);
+				continue;
+			}
+
+			desc_elem.num_tclas_elem = 1;
 		}
-
-		desc_elem.intra_access_priority = user_priority;
-		desc_elem.scs_up_avail = true;
-
-		/**
-		 * Supported classifier type 4.
-		 */
-		desc_elem.tclas_elems = (struct tclas_element *) os_malloc(sizeof(struct tclas_element));
-		if (!desc_elem.tclas_elems) {
-			wpa_printf(MSG_ERROR,
-				   "Classifier type4 failed with Bad malloc");
-			reports.push_back(status);
-			continue;
-		}
-
-		elem = desc_elem.tclas_elems;
-		memset(elem, 0, sizeof(struct tclas_element));
-		elem->classifier_type = 4;
-		if (scs_parse_type4(elem, qosPolicyData[i]) < 0) {
-			os_free(elem);
-			reports.push_back(status);
-			continue;
-		}
-
-		desc_elem.num_tclas_elem = 1;
 
 		/* Reallocate memory to scs_desc_elems to accomodate further policies */
 		new_desc_elems = static_cast<struct scs_desc_elem *>(os_realloc(scs_data->scs_desc_elems,
