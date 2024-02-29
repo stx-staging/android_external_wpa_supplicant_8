@@ -61,6 +61,24 @@ int band5Ghz = (int)BandMask::BAND_5_GHZ;
 int band6Ghz = (int)BandMask::BAND_6_GHZ;
 int band60Ghz = (int)BandMask::BAND_60_GHZ;
 
+int32_t aidl_client_version = 0;
+int32_t aidl_service_version = 0;
+
+/**
+ * Check that the AIDL service is running at least the expected version.
+ * Use to avoid the case where the AIDL interface version
+ * is greater than the version implemented by the service.
+ */
+inline int32_t isAidlServiceVersionAtLeast(int32_t expected_version)
+{
+	return expected_version <= aidl_service_version;
+}
+
+inline int32_t isAidlClientVersionAtLeast(int32_t expected_version)
+{
+	return expected_version <= aidl_client_version;
+}
+
 #define MAX_PORTS 1024
 bool GetInterfacesInBridge(std::string br_name,
                            std::vector<std::string>* interfaces) {
@@ -292,6 +310,33 @@ bool validatePassphrase(int passphrase_len, int min_len, int max_len)
 	if (min_len != -1 && passphrase_len < min_len) return false;
 	if (max_len != -1 && passphrase_len > max_len) return false;
 	return true;
+}
+
+std::string getInterfaceMacAddress(const std::string& if_name)
+{
+	u8 addr[ETH_ALEN] = {};
+	struct ifreq ifr;
+	std::string mac_addr;
+
+	android::base::unique_fd sock(socket(PF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0));
+	if (sock.get() < 0) {
+		wpa_printf(MSG_ERROR, "Failed to create sock (%s) in %s",
+			strerror(errno), __FUNCTION__);
+		return "";
+	}
+
+	memset(&ifr, 0, sizeof(ifr));
+	strlcpy(ifr.ifr_name, if_name.c_str(), IFNAMSIZ);
+	if (ioctl(sock.get(), SIOCGIFHWADDR, &ifr) < 0) {
+		wpa_printf(MSG_ERROR, "Could not get interface %s hwaddr: %s",
+			   if_name.c_str(), strerror(errno));
+		return "";
+	}
+
+	memcpy(addr, ifr.ifr_hwaddr.sa_data, ETH_ALEN);
+	mac_addr = StringPrintf("" MACSTR, MAC2STR(addr));
+
+	return mac_addr;
 }
 
 std::string CreateHostapdConfig(
@@ -541,7 +586,19 @@ std::string CreateHostapdConfig(
 	std::string eht_params_as_string;
 #ifdef CONFIG_IEEE80211BE
 	if (iface_params.hwModeParams.enable80211BE && !is_60Ghz_used) {
-		eht_params_as_string = "ieee80211be=1";
+		eht_params_as_string = "ieee80211be=1\n";
+		if (isAidlServiceVersionAtLeast(2) && isAidlClientVersionAtLeast(2)) {
+			std::string interface_mac_addr = getInterfaceMacAddress(iface_params.name);
+			if (interface_mac_addr.empty()) {
+				wpa_printf(MSG_ERROR,
+				    "Unable to set interface mac address as bssid for 11BE SAP");
+				return "";
+			}
+			eht_params_as_string += StringPrintf(
+				"bssid=%s\n"
+				"mld_ap=1",
+				interface_mac_addr.c_str());
+		}
 		/* TODO set eht_su_beamformer, eht_su_beamformee, eht_mu_beamformer */
 	} else {
 		eht_params_as_string = "ieee80211be=0";
@@ -1169,6 +1226,14 @@ std::vector<uint8_t>  generateRandomOweSsid()
 		return createStatus(HostapdStatusCode::FAILURE_UNKNOWN);
 	}
 	callbacks_.push_back(callback);
+	if (aidl_service_version == 0) {
+	    aidl_service_version = Hostapd::version;
+	    wpa_printf(MSG_INFO, "AIDL service version: %d", aidl_service_version);
+	}
+	if (aidl_client_version == 0) {
+	    callback->getInterfaceVersion(&aidl_client_version);
+	    wpa_printf(MSG_INFO, "AIDL client version: %d", aidl_client_version);
+	}
 	return ndk::ScopedAStatus::ok();
 }
 
