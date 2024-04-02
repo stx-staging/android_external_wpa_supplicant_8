@@ -1108,9 +1108,13 @@ std::vector<uint8_t>  generateRandomOweSsid()
 				// Invoke the failure callback on all registered
 				// clients.
 				for (const auto& callback : callbacks_) {
-					callback->onFailure(strlen(iface_hapd->conf->bridge) > 0 ?
+					auto status = callback->onFailure(
+						strlen(iface_hapd->conf->bridge) > 0 ?
 						iface_hapd->conf->bridge : iface_hapd->conf->iface,
 							    iface_hapd->conf->iface);
+					if (!status.isOk()) {
+						wpa_printf(MSG_ERROR, "Failed to invoke onFailure");
+					}
 				}
 			}
 		};
@@ -1129,7 +1133,10 @@ std::vector<uint8_t>  generateRandomOweSsid()
 		info.clientAddress.assign(mac_addr, mac_addr + ETH_ALEN);
 		info.isConnected = authorized;
 		for (const auto &callback : callbacks_) {
-			callback->onConnectedClientsChanged(info);
+			auto status = callback->onConnectedClientsChanged(info);
+			if (!status.isOk()) {
+				wpa_printf(MSG_ERROR, "Failed to invoke onConnectedClientsChanged");
+			}
 		}
 		};
 
@@ -1153,16 +1160,23 @@ std::vector<uint8_t>  generateRandomOweSsid()
 			info.apIfaceInstanceMacAddress.assign(iface_hapd->own_addr,
 				iface_hapd->own_addr + ETH_ALEN);
 			for (const auto &callback : callbacks_) {
-				callback->onApInstanceInfoChanged(info);
+				auto status = callback->onApInstanceInfoChanged(info);
+				if (!status.isOk()) {
+					wpa_printf(MSG_ERROR,
+						   "Failed to invoke onApInstanceInfoChanged");
+				}
 			}
 		} else if (os_strncmp(txt, AP_EVENT_DISABLED, strlen(AP_EVENT_DISABLED)) == 0
                            || os_strncmp(txt, INTERFACE_DISABLED, strlen(INTERFACE_DISABLED)) == 0)
 		{
 			// Invoke the failure callback on all registered clients.
 			for (const auto& callback : callbacks_) {
-				callback->onFailure(strlen(iface_hapd->conf->bridge) > 0 ?
+				auto status = callback->onFailure(strlen(iface_hapd->conf->bridge) > 0 ?
 					iface_hapd->conf->bridge : iface_hapd->conf->iface,
 						    iface_hapd->conf->iface);
+				if (!status.isOk()) {
+					wpa_printf(MSG_ERROR, "Failed to invoke onFailure");
+				}
 			}
 		}
 	};
