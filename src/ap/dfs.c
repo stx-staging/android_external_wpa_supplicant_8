@@ -188,7 +188,7 @@ static int dfs_chan_range_available(struct hostapd_hw_modes *mode,
 	 * If it's not allowed to use the first channel as primary, decline the
 	 * whole channel range. */
 	if (!chan_pri_allowed(first_chan)) {
-		wpa_printf(MSG_DEBUG, "DFS: primary chanenl not allowed");
+		wpa_printf(MSG_DEBUG, "DFS: primary channel not allowed");
 		return 0;
 	}
 
@@ -551,6 +551,8 @@ dfs_get_valid_channel(struct hostapd_iface *iface,
 	if (os_get_random((u8 *) &_rand, sizeof(_rand)) < 0)
 		return NULL;
 	chan_idx = _rand % num_available_chandefs;
+	wpa_printf(MSG_DEBUG, "DFS: Picked random entry from the list: %d/%d",
+		   chan_idx, num_available_chandefs);
 	dfs_find_channel(iface, &chan, chan_idx, type);
 	if (!chan) {
 		wpa_printf(MSG_DEBUG, "DFS: no random channel found");
@@ -983,6 +985,11 @@ static int hostapd_dfs_request_channel_switch(struct hostapd_iface *iface,
 	os_memset(&csa_settings, 0, sizeof(csa_settings));
 	csa_settings.cs_count = 5;
 	csa_settings.block_tx = 1;
+	csa_settings.link_id = -1;
+#ifdef CONFIG_IEEE80211BE
+	if (iface->bss[0]->conf->mld_ap)
+		csa_settings.link_id = iface->bss[0]->mld_link_id;
+#endif /* CONFIG_IEEE80211BE */
 #ifdef CONFIG_MESH
 	if (iface->mconf)
 		ieee80211_mode = IEEE80211_MODE_MESH;
@@ -1044,7 +1051,7 @@ static int hostapd_dfs_request_channel_switch(struct hostapd_iface *iface,
 }
 
 
-static void hostpad_dfs_update_background_chain(struct hostapd_iface *iface)
+static void hostapd_dfs_update_background_chain(struct hostapd_iface *iface)
 {
 	int sec = 0;
 	enum dfs_channel_type channel_type = DFS_NO_CAC_YET;
@@ -1119,7 +1126,7 @@ hostapd_dfs_start_channel_switch_background(struct hostapd_iface *iface)
 	hostapd_set_oper_centr_freq_seg1_idx(
 		iface->conf, iface->radar_background.centr_freq_seg1_idx);
 
-	hostpad_dfs_update_background_chain(iface);
+	hostapd_dfs_update_background_chain(iface);
 
 	return hostapd_dfs_request_channel_switch(
 		iface, iface->conf->channel, iface->freq,
@@ -1183,7 +1190,7 @@ int hostapd_dfs_complete_cac(struct hostapd_iface *iface, int success, int freq,
 		}
 	} else if (hostapd_dfs_is_background_event(iface, freq)) {
 		iface->radar_background.cac_started = 0;
-		hostpad_dfs_update_background_chain(iface);
+		hostapd_dfs_update_background_chain(iface);
 	}
 
 	return 0;
@@ -1317,7 +1324,7 @@ hostapd_dfs_background_start_channel_switch(struct hostapd_iface *iface,
 		 * Just select a new random channel according to the
 		 * regulations for monitoring.
 		 */
-		hostpad_dfs_update_background_chain(iface);
+		hostapd_dfs_update_background_chain(iface);
 		return 0;
 	}
 
@@ -1479,7 +1486,7 @@ int hostapd_dfs_nop_finished(struct hostapd_iface *iface, int freq,
 	} else if (dfs_use_radar_background(iface) &&
 		   iface->radar_background.channel == -1) {
 		/* Reset radar background chain if disabled */
-		hostpad_dfs_update_background_chain(iface);
+		hostapd_dfs_update_background_chain(iface);
 	}
 
 	return 0;
