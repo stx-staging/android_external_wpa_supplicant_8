@@ -2482,12 +2482,20 @@ static void nl80211_mgmt_handle_register_eloop(struct i802_bss *bss)
 }
 
 
-static int nl80211_register_action_frame(struct i802_bss *bss,
-					 const u8 *match, size_t match_len)
+static int nl80211_register_action_frame2(struct i802_bss *bss,
+					  const u8 *match, size_t match_len,
+					  bool multicast)
 {
 	u16 type = (WLAN_FC_TYPE_MGMT << 2) | (WLAN_FC_STYPE_ACTION << 4);
 	return nl80211_register_frame(bss, bss->nl_mgmt,
-				      type, match, match_len, false);
+				      type, match, match_len, multicast);
+}
+
+
+static int nl80211_register_action_frame(struct i802_bss *bss,
+					 const u8 *match, size_t match_len)
+{
+	return nl80211_register_action_frame2(bss, match, match_len, false);
 }
 
 
@@ -2563,11 +2571,15 @@ static int nl80211_mgmt_subscribe_non_ap(struct i802_bss *bss)
 		ret = -1;
 #endif /* CONFIG_P2P */
 #ifdef CONFIG_NAN_USD
+#define NAN_PUB_ACTION ((u8 *) "\x04\x09\x50\x6f\x9a\x13")
 	/* NAN SDF Public Action */
-	if (nl80211_register_action_frame(bss,
-					  (u8 *) "\x04\x09\x50\x6f\x9a\x13",
-					  6) < 0)
-		ret = -1;
+	if (nl80211_register_action_frame2(bss, NAN_PUB_ACTION, 6, true) < 0) {
+		/* fallback to non-multicast */
+		if (nl80211_register_action_frame2(bss, NAN_PUB_ACTION, 6,
+						   false) < 0)
+			ret = -1;
+	}
+#undef NAN_PUB_ACTION
 #endif /* CONFIG_NAN_USD */
 #ifdef CONFIG_DPP
 	/* DPP Public Action */
@@ -4833,7 +4845,7 @@ static int nl80211_fils_discovery(struct i802_bss *bss, struct nl_msg *msg,
 
 static int nl80211_unsol_bcast_probe_resp(struct i802_bss *bss,
 					  struct nl_msg *msg,
-					  struct wpa_driver_ap_params *params)
+					  struct unsol_bcast_probe_resp *ubpr)
 {
 	struct nlattr *attr;
 
@@ -4846,15 +4858,15 @@ static int nl80211_unsol_bcast_probe_resp(struct i802_bss *bss,
 
 	wpa_printf(MSG_DEBUG,
 		   "nl80211: Unsolicited broadcast Probe Response frame interval: %u",
-		   params->unsol_bcast_probe_resp_interval);
+		   ubpr->unsol_bcast_probe_resp_interval);
 	attr = nla_nest_start(msg, NL80211_ATTR_UNSOL_BCAST_PROBE_RESP);
 	if (!attr ||
 	    nla_put_u32(msg, NL80211_UNSOL_BCAST_PROBE_RESP_ATTR_INT,
-			params->unsol_bcast_probe_resp_interval) ||
-	    (params->unsol_bcast_probe_resp_tmpl &&
+			ubpr->unsol_bcast_probe_resp_interval) ||
+	    (ubpr->unsol_bcast_probe_resp_tmpl &&
 	     nla_put(msg, NL80211_UNSOL_BCAST_PROBE_RESP_ATTR_TMPL,
-		     params->unsol_bcast_probe_resp_tmpl_len,
-		     params->unsol_bcast_probe_resp_tmpl)))
+		     ubpr->unsol_bcast_probe_resp_tmpl_len,
+		     ubpr->unsol_bcast_probe_resp_tmpl)))
 		return -1;
 
 	nla_nest_end(msg, attr);
@@ -5233,10 +5245,10 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 		   params->key_mgmt_suites);
 	num_suites = wpa_key_mgmt_to_suites(params->key_mgmt_suites,
 					    suites, ARRAY_SIZE(suites));
-	if (num_suites > NL80211_MAX_NR_AKM_SUITES)
+	if ((unsigned int) num_suites > drv->capa.max_num_akms)
 		wpa_printf(MSG_DEBUG,
-			   "nl80211: Not enough room for all AKM suites (num_suites=%d > NL80211_MAX_NR_AKM_SUITES)",
-			   num_suites);
+			   "nl80211: Not enough room for all AKM suites (num_suites=%d > %d)",
+			   num_suites, drv->capa.max_num_akms);
 	else if (num_suites &&
 		 nla_put(msg, NL80211_ATTR_AKM_SUITES, num_suites * sizeof(u32),
 			 suites))
@@ -5439,8 +5451,8 @@ static int wpa_driver_nl80211_set_ap(void *priv,
 			goto fail;
 	}
 
-	if (params->unsol_bcast_probe_resp_interval &&
-	    nl80211_unsol_bcast_probe_resp(bss, msg, params) < 0)
+	if (params->ubpr.unsol_bcast_probe_resp_interval &&
+	    nl80211_unsol_bcast_probe_resp(bss, msg, &params->ubpr) < 0)
 		goto fail;
 
 	if (nl80211_mbssid(msg, params) < 0)
@@ -7812,25 +7824,37 @@ static int i802_set_frag(void *priv, int frag)
 }
 
 
-static int i802_flush(void *priv)
+static int i802_flush(void *priv, int link_id)
 {
 	struct i802_bss *bss = priv;
 	struct nl_msg *msg;
 	int res;
 
-	wpa_printf(MSG_DEBUG, "nl80211: flush -> DEL_STATION %s (all)",
-		   bss->ifname);
+	if (link_id == NL80211_DRV_LINK_ID_NA)
+		wpa_printf(MSG_DEBUG, "nl80211: flush -> DEL_STATION %s (all)",
+			   bss->ifname);
+	else
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: flush -> DEL_STATION %s (with link %d)",
+			   bss->ifname, link_id);
 
 	/*
 	 * XXX: FIX! this needs to flush all VLANs too
 	 */
 	msg = nl80211_bss_msg(bss, 0, NL80211_CMD_DEL_STATION);
+	if (link_id >= 0 && (bss->valid_links & BIT(link_id)) &&
+	    nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id))
+		goto fail;
+
 	res = send_and_recv_cmd(bss->drv, msg);
 	if (res) {
 		wpa_printf(MSG_DEBUG, "nl80211: Station flush failed: ret=%d "
 			   "(%s)", res, strerror(-res));
 	}
 	return res;
+fail:
+	nlmsg_free(msg);
+	return -1;
 }
 
 
@@ -8337,7 +8361,7 @@ static int i802_sta_deauth(void *priv, const u8 *own_addr, const u8 *addr,
 	return wpa_driver_nl80211_send_mlme(bss, (u8 *) &mgmt,
 					    IEEE80211_HDRLEN +
 					    sizeof(mgmt.u.deauth), 0, 0, 0, 0,
-					    0, NULL, 0, 0, -1);
+					    0, NULL, 0, 0, link_id);
 }
 
 
@@ -9965,6 +9989,9 @@ static int nl80211_set_param(void *priv, const char *param)
 			WPA_DRIVER_FLAGS2_SEC_LTF_AP;
 	}
 
+	if (os_strstr(param, "rsn_override_in_driver=1"))
+		drv->capa.flags2 |= WPA_DRIVER_FLAGS2_RSN_OVERRIDE_STA;
+
 	return 0;
 }
 
@@ -10611,11 +10638,16 @@ static int nl80211_send_tdls_mgmt(void *priv, const u8 *dst, u8 action_code,
 	    nl80211_tdls_set_discovery_resp_link(drv, link_id) < 0)
 		return -EOPNOTSUPP;
 
+	if (link_id < 0 && drv->sta_mlo_info.valid_links)
+		link_id = drv->sta_mlo_info.assoc_link_id;
+
 	if (!(msg = nl80211_drv_msg(drv, 0, NL80211_CMD_TDLS_MGMT)) ||
 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, dst) ||
 	    nla_put_u8(msg, NL80211_ATTR_TDLS_ACTION, action_code) ||
 	    nla_put_u8(msg, NL80211_ATTR_TDLS_DIALOG_TOKEN, dialog_token) ||
 	    nla_put_u16(msg, NL80211_ATTR_STATUS_CODE, status_code) ||
+	    (link_id >= 0 &&
+	     nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id)) ||
 	    nl80211_add_peer_capab(msg, peer_capab) ||
 	    (initiator && nla_put_flag(msg, NL80211_ATTR_TDLS_INITIATOR)) ||
 	    nla_put(msg, NL80211_ATTR_IE, len, buf))
@@ -10818,7 +10850,7 @@ static int driver_nl80211_link_remove(void *priv, enum wpa_driver_if_type type,
 
 	bss->ctx = bss->flink->ctx;
 
-	if (drv->first_bss == bss && !bss->valid_links)
+	if (drv->first_bss == bss && bss->valid_links)
 		drv->ctx = bss->ctx;
 
 	if (!bss->valid_links) {
@@ -11386,6 +11418,13 @@ static int nl80211_switch_channel(void *priv, struct csa_settings *settings)
 		goto fail;
 
 	nla_nest_end(msg, beacon_csa);
+
+#ifdef CONFIG_IEEE80211AX
+	if (settings->ubpr.unsol_bcast_probe_resp_interval &&
+	    nl80211_unsol_bcast_probe_resp(bss, msg, &settings->ubpr) < 0)
+		goto fail;
+#endif /* CONFIG_IEEE80211AX */
+
 	ret = send_and_recv_cmd(drv, msg);
 	if (ret) {
 		wpa_printf(MSG_DEBUG, "nl80211: switch_channel failed err=%d (%s)",
@@ -11467,6 +11506,27 @@ static int nl80211_switch_color(void *priv, struct cca_settings *settings)
 	}
 
 	nla_nest_end(msg, beacon_cca);
+
+	if (settings->ubpr.unsol_bcast_probe_resp_interval &&
+	    nl80211_unsol_bcast_probe_resp(bss, msg, &settings->ubpr) < 0) {
+		ret = -ENOBUFS;
+		goto error;
+	}
+
+#ifdef CONFIG_IEEE80211BE
+	if (nl80211_link_valid(bss->valid_links, settings->link_id)) {
+		wpa_printf(MSG_DEBUG,
+			   "nl80211: Color change request on link_id=%d",
+			   settings->link_id);
+
+		if (nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID,
+			       settings->link_id)) {
+			nlmsg_free(msg);
+			return -1;
+		}
+	}
+#endif /* CONFIG_IEEE80211BE */
+
 	ret = send_and_recv_cmd(drv, msg);
 	if (ret) {
 		wpa_printf(MSG_DEBUG,
@@ -14005,7 +14065,7 @@ static int nl80211_link_add(void *priv, u8 link_id, const u8 *addr,
 		}
 	}
 
-	msg = nl80211_drv_msg(drv, 0, NL80211_CMD_ADD_LINK);
+	msg = nl80211_bss_msg(bss, 0, NL80211_CMD_ADD_LINK);
 	if (!msg ||
 	    nla_put_u8(msg, NL80211_ATTR_MLO_LINK_ID, link_id) ||
 	    nla_put(msg, NL80211_ATTR_MAC, ETH_ALEN, addr)) {
@@ -14029,8 +14089,8 @@ static int nl80211_link_add(void *priv, u8 link_id, const u8 *addr,
 	bss->valid_links |= BIT(link_id);
 	bss->links[link_id].ctx = bss_ctx;
 
-	wpa_printf(MSG_DEBUG, "nl80211: MLD: valid_links=0x%04x",
-		   bss->valid_links);
+	wpa_printf(MSG_DEBUG, "nl80211: MLD: valid_links=0x%04x on %s",
+		   bss->valid_links, bss->ifname);
 	return 0;
 }
 
